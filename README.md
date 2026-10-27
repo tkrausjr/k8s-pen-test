@@ -27,6 +27,25 @@ cluster.
   follow that repo's instructions to apply the microservice layered security policy.
 
 ---
+## 0. Configure the attacker pod with your environment information by editing the attacker-pod.yaml
+```bash
+    env:
+    - name: VIP
+      value: "0.0.0.0"
+    - name: HOST
+      value: "metal-store.domain-name.zoo"
+    - name: SVC
+      value: "http://music-store-1-service.music-store.svc.cluster.local:5000"
+    - name: TGT_NS
+      value: "music-store"
+    - name: TGT_LABEL
+      value: "app=music-store-1"
+    - name: PORT
+      value: "5000"
+    - name: SQLI
+      value: "search?searchString=%27%20OR%201%3D1--"
+```
+
 
 ## 1. Deploy the attacker pod
 
