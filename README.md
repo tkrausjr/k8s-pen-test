@@ -1,4 +1,4 @@
-# k8s-pen-test — Avi WAF + vDefend Microsegmentation Demo
+## k8s-pen-test — Avi WAF + vDefend Microsegmentation Demo
 
 An attacker pod and a small probe script (`waf-connectivity-check.sh`) used to
 demonstrate layered Kubernetes network security for the **music-store** app:
