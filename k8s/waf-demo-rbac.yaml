@@ -1,0 +1,56 @@
+---
+# 1. Create the ServiceAccount for the Pod
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: waf-demo-sa
+  namespace: music-store # The ServiceAccount must be created in the namespace where the Pod is running.
+
+---
+
+# 2. Define the permissions needed (Get Pods, Exec into Pods)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: waf-demo-pod-role
+rules:
+- apiGroups: [""]
+  resources: ["pods","services"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+  
+---
+
+# 3. Bind the permissions in the 'music-store' namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: waf-demo-music-store-binding
+  namespace: music-store
+subjects:
+- kind: ServiceAccount
+  name: waf-demo-sa
+  namespace: music-store
+roleRef:
+  kind: ClusterRole
+  name: waf-demo-pod-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+# 6. Bind the permissions in the 'rogue' namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: waf-demo-rogue-binding
+  namespace: rogue
+subjects:
+- kind: ServiceAccount
+  name: waf-demo-sa
+  namespace: music-store
+roleRef:
+  kind: ClusterRole
+  name: waf-demo-pod-role
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,100 @@
+    #!/bin/bash
+    # waf-connectivity-check.sh
+    #
+    # Run from INSIDE a pod (e.g. the attacker/waf-demo pod). Non-interactive.
+    # Probes the music-store frontend over four paths and prints the HTTP return
+    # code plus a pass/fail for each. No kubectl exec, no Enter prompts - everything
+    # is driven by environment variables set in the pod spec.
+    #
+    # Paths tested:
+    #   1) Pod IP        - target pod discovered by label, hit directly (bypasses Service + Avi)
+    #   2) Service name  - in-cluster Kubernetes Service DNS (bypasses Avi)
+    #   3) HTTPRoute FQDN - the real ingress path through the Avi VIP + WAF (clean request)
+    #   4) HTTPRoute FQDN - same path, but carrying a SQL injection payload (WAF must block)
+    #
+    # Set these in the pod spec's container env (shown with example values):
+    #   VIP        10.0.0.0                        # Avi VIP the HTTPRoute FQDN resolves to
+    #   HOST       metal-store.domain-name.suffix      # HTTPRoute FQDN
+    #   SVC        http://music-store-1-service.music-store.svc.cluster.local:5000
+    #   TGT_NS     music-store                        # namespace the target pod lives in
+    #   TGT_LABEL  app=music-store-1                  # label selector used to find the target pod
+    #   PORT       5000                               # app port for the pod-IP probe
+    #   SQLI       search?searchString=%27%20OR%201%3D1--   # injection payload (query string)
+    
+    set -u
+    
+    VIP=${VIP:-10.0.0.0}
+    HOST=${HOST:-metal-store.domain-name.suffix}
+    SVC=${SVC:-http://music-store-1-service.music-store.svc.cluster.local:5000}
+    TGT_NS=${TGT_NS:-music-store}
+    TGT_LABEL=${TGT_LABEL:-app=music-store-1}
+    PORT=${PORT:-5000}
+    SQLI=${SQLI:-search?searchString=%27%20OR%201%3D1--}
+    
+    U=http://$HOST
+    R="--resolve $HOST:80:$VIP"   # pin FQDN to the Avi VIP
+    TIMEOUT=${TIMEOUT:-5}
+    
+    # colours only if attached to a terminal
+    if [ -t 1 ]; then
+      B=$(tput bold); C=$(tput setaf 6); G=$(tput setaf 2); Rc=$(tput setaf 1); Y=$(tput setaf 3); N=$(tput sgr0)
+    else
+      B=; C=; G=; Rc=; Y=; N=
+    fi
+    
+    hr()  { echo "${B}${C}----------------------------------------------------------------${N}"; }
+    head() { echo; hr; echo "${B}${C}  $*${N}"; hr; }
+    
+    # probe <label> <expected-note> <curl-args...>
+    # prints the HTTP code (or the curl failure) and a PASS/FAIL line
+    probe() {
+      local label=$1 note=$2; shift 2
+      echo
+      echo "${B}== ${label}${N}"
+      echo "   ${Y}expect: ${note}${N}"
+      echo "   ${B}\$ curl $*${N}"
+      local out code err
+      out=$(curl -k -s -o /dev/null -w '%{http_code}' --max-time "$TIMEOUT" "$@" 2>/tmp/curlerr)
+      code=$?
+      err=$(cat /tmp/curlerr 2>/dev/null)
+      if [ "$code" -ne 0 ]; then
+        echo "   ${Rc}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})}${N}"
+        echo "   Traffic may have been dropped by ACNP baseline rule."
+      else
+        echo "   ${G}RESULT: HTTP ${out}${N}"
+      fi
+    }
+    
+    head "Target discovery"
+    echo "   namespace : ${TGT_NS}"
+    echo "   label     : ${TGT_LABEL}"
+    IP=$(kubectl -n "$TGT_NS" get pod -l "$TGT_LABEL" -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
+    if [ -z "$IP" ]; then
+      echo "   ${Y}pod IP    : not found (RBAC on pods/get,list in ${TGT_NS}? label correct?)${N}"
+    else
+      echo "   pod IP    : ${IP}"
+    fi
+    
+    head "1) Direct to pod IP  (Tries to bypass Service and Avi WAF)"
+    if [ -n "$IP" ]; then
+      probe "pod IP ${IP}:${PORT}" "dropped by baseline ACNP rule default-deny" "http://${IP}:${PORT}/"
+    else
+      echo "   ${Y}skipped - no pod IP resolved${N}"
+    fi
+    
+    head "2) In-cluster Service name  (Tries to bypass Avi WAF)"
+    probe "service ${SVC}" "dropped by default-deny (only Avi SE may reach :${PORT})" "${SVC}/"
+    
+    head "3) HTTPRoute FQDN through Avi  (SQL injection - WAF should block with 400 error)"
+    probe "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
+
+    head "4) HTTPRoute FQDN through Avi  (clean request should be allowed)"
+    probe "GET ${U}/" "HTTP 200 - allowed ingress path through Avi + WAF" $R "${U}/"
+
+    echo
+    hr
+    echo "${B}${C}  SUMMARY${N}"
+    echo "   1 & 2 around Avi : expect failure / deny - no WAF, no allowed path"
+    echo "   3 through Avi    : expect 403 - WAF inspects and blocks the attack"
+    echo "   4 through Avi    : expect 200 - clean traffic allowed"
+    hr
