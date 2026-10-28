@@ -77,7 +77,6 @@
       if [ "$code" -ne 0 ]; then
         if [ "$deny" -eq 1 ]; then
           echo "   ${G}RESULT: no HTTP response - (expected - traffic dropped)${N}"
-          echo "   Traffic dropped by ACNP baseline rule."
         else
           echo "   ${Rc}RESULT: no HTTP response - ${N}"
           echo "   Traffic dropped by ACNP baseline rule."
@@ -117,7 +116,7 @@
     head "2) In-cluster Service name  (Tries to bypass Avi WAF)"
     probe --deny "service ${SVC}" "dropped by default-deny (only Avi SE may reach :${PORT})" "${SVC}/"
     
-    head "3) HTTPRoute FQDN through Avi  (SQL injection - WAF should block with 400 error)"
+    head "3) HTTPRoute FQDN through Avi  (SQL injection - WAF should block with 403 error)"
     probe --expect 403 "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
 
     head "4) HTTPRoute FQDN through Avi  (PHP injection - WAF should block with 403)"
