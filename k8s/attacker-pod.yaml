@@ -1,9 +1,9 @@
-# waf-connectivity-check-pod.yaml
+# connectivity-check-pod.yaml
 #
-# Runs waf-connectivity-check.sh from inside the music-store namespace.
+# Runs connectivity-check.sh from inside the music-store namespace.
 # This file holds two documents: the Pod and a ConfigMap carrying the script,
 # mounted read-only so no image rebuild is needed to change it - edit the
-# embedded script (keep it in sync with ../waf-connectivity-check.sh) and
+# embedded script (keep it in sync with ../connectivity-check.sh) and
 # recreate the pod.
 #
 # Requires (from waf-demo-rbac.yaml) the waf-demo-sa ServiceAccount in
@@ -12,14 +12,14 @@
 #
 # Apply (one shot - Pod + ConfigMap together):
 #   kubectl apply -f k8s/waf-demo-rbac.yaml          # SA + bindings, once
-#   kubectl apply -f k8s/waf-connectivity-check-pod.yaml
+#   kubectl apply -f k8s/attacker-pod.yaml
 #
 # The pod stays running (sleep infinity). Exec in and run the script by hand:
-#   kubectl -n music-store exec -it pod/waf-conn-check -- bash
+#   kubectl -n music-store exec -it pod/attacker-pod -- bash
 #   # then inside the pod:
-#   /scripts/waf-connectivity-check.sh
+#   /scripts/connectivity-check.sh
 #   # env vars can be overridden per run, e.g.:
-#   VIP=10.47.7.26 /scripts/waf-connectivity-check.sh
+#   VIP=10.47.7.26 /scripts/connectivity-check.sh
 ---
 apiVersion: v1
 kind: Pod
@@ -52,7 +52,7 @@ spec:
     - name: PORT
       value: "5000"
     - name: SQLI
-      value: "search?searchString=%27%20OR%201%3D1--"
+      value: "?searchString=%27%20OR%201%3D1--"
     - name: PHPI
       value: "?file=php%3A%2F%2Ffilter%2Fconvert.base64-encode%2Fresource%3Dindex.php"
     volumeMounts:
@@ -62,23 +62,23 @@ spec:
   volumes:
   - name: script
     configMap:
-      name: waf-connectivity-check
+      name: connectivity-check
       defaultMode: 0555
 ---
-# ConfigMap holding the script. Keep it in sync with ../waf-connectivity-check.sh;
+# ConfigMap holding the script. Keep it in sync with ../connectivity-check.sh;
 # to update after editing that file, regenerate this block or run:
-#   kubectl -n music-store create configmap waf-connectivity-check \
-#     --from-file=waf-connectivity-check.sh=waf-connectivity-check.sh \
+#   kubectl -n music-store create configmap connectivity-check \
+#     --from-file=connectivity-check.sh=connectivity-check.sh \
 #     --dry-run=client -o yaml | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: waf-connectivity-check
+  name: connectivity-check
   namespace: music-store
 data:
-  waf-connectivity-check.sh: |
+  connectivity-check.sh: |
         #!/bin/bash
-        # waf-connectivity-check.sh
+        # connectivity-check.sh
         #
         # Run from INSIDE a pod (e.g. the attacker/waf-demo pod). Non-interactive.
         # Probes the music-store frontend over four paths and prints the HTTP return
@@ -99,7 +99,7 @@ data:
         #   TGT_NS     music-store                        # namespace the target pod lives in
         #   TGT_LABEL  app=music-store-1                  # label selector used to find the target pod
         #   PORT       5000                               # app port for the pod-IP probe
-        #   SQLI       search?searchString=%27%20OR%201%3D1--   # SQL injection payload (query string)
+        #   SQLI       ?searchString=%27%20OR%201%3D1--   # SQL injection payload (root-path query string)
         #   PHPI       ?file=php%3A%2F%2Ffilter%2F...    # PHP injection payload (query string)
         
         set -u
@@ -110,7 +110,7 @@ data:
         TGT_NS=${TGT_NS:-music-store}
         TGT_LABEL=${TGT_LABEL:-app=music-store-1}
         PORT=${PORT:-5000}
-        SQLI=${SQLI:-search?searchString=%27%20OR%201%3D1--}
+        SQLI=${SQLI:-?searchString=%27%20OR%201%3D1--}
         PHPI=${PHPI:-?file=php%3A%2F%2Ffilter%2Fconvert.base64-encode%2Fresource%3Dindex.php}
     
         U=http://$HOST
@@ -127,9 +127,23 @@ data:
         hr()  { echo "${B}${C}----------------------------------------------------------------${N}"; }
         head() { echo; hr; echo "${B}${C}  $*${N}"; hr; }
         
-        # probe <label> <expected-note> <curl-args...>
-        # prints the HTTP code (or the curl failure) and a PASS/FAIL line
+        # probe [--deny | --expect CODE] <label> <expected-note> <curl-args...>
+        # prints the HTTP code (or the curl failure) and a PASS/FAIL line.
+        # --deny        : a no-response (curl failure) is the EXPECTED result -> green,
+        #                 while any HTTP response is unexpected -> red. Used for probes
+        #                 that should be dropped (e.g. pod IP / Service behind default-deny).
+        # --expect CODE : only HTTP CODE is the expected result -> green; any other
+        #                 code (or no response) -> red. Used for attack probes that the
+        #                 WAF must block (e.g. --expect 403) or the clean path (200).
         probe() {
+          local deny=0 expect=""
+          while :; do
+            case "$1" in
+              --deny)   deny=1; shift ;;
+              --expect) expect=$2; shift 2 ;;
+              *)        break ;;
+            esac
+          done
           local label=$1 note=$2; shift 2
           echo
           echo "${B}== ${label}${N}"
@@ -140,10 +154,24 @@ data:
           code=$?
           err=$(cat /tmp/curlerr 2>/dev/null)
           if [ "$code" -ne 0 ]; then
-            echo "   ${Rc}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})}${N}"
-            echo "   Traffic may have been dropped by ACNP baseline rule."
+            if [ "$deny" -eq 1 ]; then
+              echo "   ${G}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})} (expected - traffic dropped)${N}"
+            else
+              echo "   ${Rc}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})}${N}"
+              echo "   Traffic may have been dropped by ACNP baseline rule."
+            fi
           else
-            echo "   ${G}RESULT: HTTP ${out}${N}"
+            if [ "$deny" -eq 1 ]; then
+              echo "   ${Rc}RESULT: HTTP ${out} (unexpected - traffic was NOT dropped)${N}"
+            elif [ -n "$expect" ]; then
+              if [ "$out" = "$expect" ]; then
+                echo "   ${G}RESULT: HTTP ${out}${N}"
+              else
+                echo "   ${Rc}RESULT: HTTP ${out} (unexpected - expected ${expect})${N}"
+              fi
+            else
+              echo "   ${G}RESULT: HTTP ${out}${N}"
+            fi
           fi
         }
         
@@ -159,27 +187,28 @@ data:
         
         head "1) Direct to pod IP  (Tries to bypass Service and Avi WAF)"
         if [ -n "$IP" ]; then
-          probe "pod IP ${IP}:${PORT}" "dropped by baseline ACNP rule default-deny" "http://${IP}:${PORT}/"
+          probe --deny "pod IP ${IP}:${PORT}" "dropped by baseline ACNP rule default-deny" "http://${IP}:${PORT}/"
         else
           echo "   ${Y}skipped - no pod IP resolved${N}"
         fi
         
         head "2) In-cluster Service name  (Tries to bypass Avi WAF)"
-        probe "service ${SVC}" "dropped by default-deny (only Avi SE may reach :${PORT})" "${SVC}/"
+        probe --deny "service ${SVC}" "dropped by default-deny (only Avi SE may reach :${PORT})" "${SVC}/"
         
         head "3) HTTPRoute FQDN through Avi  (SQL injection - WAF should block with 400 error)"
-        probe "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
+        probe --expect 403 "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
     
         head "4) HTTPRoute FQDN through Avi  (PHP injection - WAF should block with 403)"
-        probe "GET ${U}/${PHPI}" "HTTP 403 - Avi WAF blocks the PHP wrapper/LFI at the SE" $R "${U}/${PHPI}"
+        probe --expect 403 "GET ${U}/${PHPI}" "HTTP 403 - Avi WAF blocks the PHP wrapper/LFI at the SE" $R "${U}/${PHPI}"
     
         head "5) HTTPRoute FQDN through Avi  (clean request should be allowed)"
-        probe "GET ${U}/" "HTTP 200 - allowed ingress path through Avi + WAF" $R "${U}/"
+        probe --expect 200 "GET ${U}/" "HTTP 200 - allowed ingress path through Avi + WAF" $R "${U}/"
     
         echo
         hr
         echo "${B}${C}  SUMMARY${N}"
-        echo "   1 & 2 around Avi : expect failure / deny - no WAF, no allowed path"
+        echo "   1 Bypassing Avi : expect failure/drop - vDefend forces traffic through the WAF"
+        echo "   2 Bypassing Avi : expect failure/drop - vDefend forces traffic through the WAF"
         echo "   3 through Avi    : expect 403 - WAF inspects and blocks the SQL injection"
         echo "   4 through Avi    : expect 403 - WAF inspects and blocks the PHP injection"
         echo "   5 through Avi    : expect 200 - clean traffic allowed"
