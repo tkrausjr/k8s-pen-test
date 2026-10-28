@@ -38,19 +38,3 @@ roleRef:
   name: waf-demo-pod-role
   apiGroup: rbac.authorization.k8s.io
 
----
-
-# 6. Bind the permissions in the 'rogue' namespace
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: waf-demo-rogue-binding
-  namespace: rogue
-subjects:
-- kind: ServiceAccount
-  name: waf-demo-sa
-  namespace: music-store
-roleRef:
-  kind: ClusterRole
-  name: waf-demo-pod-role
-  apiGroup: rbac.authorization.k8s.io
