@@ -14,7 +14,7 @@ cluster.
 
 | # | Target | Path | What it proves |
 |---|--------|------|----------------|
-| 1 | Pod IP (direct) | bypasses Service + Avi | reachable only if microsegmentation is off |
+| 1 | In-cluster Pod IP (direct) | bypasses Service + Avi | reachable only if microsegmentation is off |
 | 2 | In-cluster Service name | bypasses Avi | reachable only if microsegmentation is off |
 | 3 | HTTPRoute FQDN via Avi | SQL injection | the WAF inspects and blocks it |
 | 4 | HTTPRoute FQDN via Avi | clean request | the allowed ingress path |
@@ -40,6 +40,7 @@ Confirm the policies are in place:
 
 ```bash
 k get acnp -A
+k get l7rule -n music-store
 ```
 
 ## 2. Run the demo
@@ -48,7 +49,7 @@ The flow runs the probe three times — with policy enforced, with the baseline
 deny removed, and with it restored — to show the default-deny controlling
 microservice communication.
 
-### Step A — Baseline: all security policies applied
+### Step A — Baseline: all security policies and WAF policies are applied
 
 ```bash
 k -n music-store exec -it pod/attacker -- /bin/bash
@@ -64,16 +65,20 @@ k -n music-store exec -it pod/attacker -- /bin/bash
 | 3 — FQDN via Avi (SQLi) | **HTTP 403** | blocked by the Avi WAF |
 | 4 — FQDN via Avi (clean) | **HTTP 200** | allowed ingress path |
 
-> Test 3 is always blocked by the WAF whether or not the in-cluster policies are
-> present — the WAF sits at the Avi SE, in front of the app.
+> Test 3 will either be blocked by the WAF(403) or fail with a (404) if the WAF rule is disabled because the Path is not found. Wonder if there is a way to fix this.
 
 ### Step B — Remove the baseline deny
 
 Dropping the catch-all opens the two in-cluster paths that were being denied.
 
 ```bash
+# Delete ACNP Catch all baseline rule
 k delete acnp baseline-default-deny
-#   clusternetworkpolicy.crd.antrea.io "baseline-default-deny" deleted
+  clusternetworkpolicy.crd.antrea.io "baseline-default-deny" deleted
+
+# Delete the AKO l7rule
+k delete l7rule metal-store-waf -n music-store
+
 
 k -n music-store exec -it pod/attacker -- /bin/bash
   ./waf-connectivity-check.sh
@@ -85,12 +90,12 @@ k -n music-store exec -it pod/attacker -- /bin/bash
 |------|--------|-----|
 | 1 — Pod IP | **HTTP 200** | direct pod access now permitted |
 | 2 — Service name | **HTTP 200** | Service access now permitted |
-| 3 — FQDN via Avi (SQLi) | **HTTP 403** | still blocked by the Avi WAF |
+| 3 — FQDN via Avi (SQLi) | **HTTP 404** | Not blocked by WAF but no path found |
 | 4 — FQDN via Avi (clean) | **HTTP 200** | allowed ingress path |
 
 ### Step C — Restore the baseline deny
 
-Reapply the policy to showcase full control of microservice communication.
+Reapply the ACNP policy and :to showcase full control of microservice communication.
 
 ```bash
 k apply -f ./k8s/baseline-default-deny.yaml
