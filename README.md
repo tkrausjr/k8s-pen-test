@@ -1,8 +1,8 @@
 ## k8s-pen-test — Avi WAF + vDefend Microsegmentation Demo
 
 An attacker pod and a small probe script (`connectivity-check.sh`) used to
-demonstrate layered Kubernetes network security for the **music-store** app:
-Avi (AKO) WAF at the ingress, and vDefend/Antrea microsegmentation inside the
+demonstrate layered Kubernetes network security for any Kubernetes Web Application running on VCF with vDefend and Avi using
+Avi (AKO) WAF for inbound traffic, and vDefend/Antrea microsegmentation inside the
 cluster.
 
 > **v0.6** — the probe script ships as a ConfigMap mounted into the pod, for
@@ -20,11 +20,6 @@ k8s-pen-test/
     └── attacker-rbac.yaml        # ServiceAccount waf-demo-sa + ClusterRole + bindings
 ```
 
-> **Renamed/removed since earlier versions:** `waf-demo-rbac.yaml` → `attacker-rbac.yaml`;
-> `waf-demo-pods.yaml` → `k8s/attacker-pod.yaml` (now also carries the script ConfigMap);
-> removed `rogue-ns.yaml`, `old-waf-demo.sh`, and `attacker-pod.yaml.bak`.
-> Inside the pod the ConfigMap mounts the script at **`/scripts/connectivity-check.sh`**.
-
 ## What the probe tests
 
 `connectivity-check.sh` runs **five** checks from inside the pod. Each prints a
@@ -39,18 +34,26 @@ colored pass/fail verdict against its expected result:
 | 5 | HTTPRoute FQDN via Avi | clean request | **HTTP 200** (allowed) | `--expect 200` — 200 = green, else red |
 
 The attacks (3, 4) target the **root path** with the payload in a query string, so
-when the WAF is **off** they return **200** (reached the app), not 404 — a clean
+when the WAF is **off** they return **200** (reached the app), not 403 — a clean
 "not blocked" signal.
 
 ## Prerequisites
 
-- The **music-store** application is deployed to the `music-store` namespace.
+- The **music-store** or similar application is deployed to a Kubernetes namespace.
 - The layered security policies (3 tiers) are applied from
   [`k8s-vdefend-layered`](https://github.com/tkrausjr/k8s-vdefend-layered.git) —
   follow that repo's instructions to apply the microservice layered security policy.
 - The Avi WAF is attached to the `metal-store` HTTPRoute via an AKO **L7Rule**
   (`metal-store-waf`) referenced by an `ExtensionRef` filter — this is what makes
   tests 3 and 4 return 403.
+- Avi WAF policy "System-WAF-Policy" is set to Enforcement Policy Mode.
+- The Target Web Pod is Labeled so the probe's selector finds the Pods and can return its IP
+
+```bash
+k label po web-demo-1 app=music-store-1 --overwrite=true
+#   pod/web-demo-1 labeled
+
+```
 
 ---
 ## 0. Configure the attacker pod for your environment
@@ -85,49 +88,22 @@ k apply -f k8s/attacker-rbac.yaml      # ServiceAccount waf-demo-sa + bindings i
 k apply -f k8s/attacker-pod.yaml       # attacker Pod + connectivity-check ConfigMap
 ```
 
-Confirm the policies and the WAF rule are in place:
+Remove the ACNP baseline policy and the WAF l7rule to show the vulnerabilities and how vDefend and Avi work better together:
 
 ```bash
+k delete acnp music-store-baseline-default-deny.yaml
+k delete l7rule metal-store-waf -n music-store
 k get acnp -A
 k get l7rule -n music-store
 ```
 
-## 2. Run the demo
+## 2. Run connectivity script on the attacker pod to show the applications response without WAF and vDefend
 
-The flow runs the probe three times — with policy enforced, with the baseline
-deny + WAF removed, and with them restored — to show the default-deny and WAF
-controlling communication.
+The flow runs the probe tests five times — without the WAF policy l7rule or ACNP baseline policy applied. Dropping the baseline catch-all opens the two in-cluster paths; deleting the L7Rule effectively detaches the WAF so the attacks reach the app.
 
-### Step A — Baseline: all security policies and the WAF are applied
+### Step A — Baseline: No security policies or L7 WAF policies are applied
 
 ```bash
-k -n music-store exec -it pod/attacker -- /bin/bash
-  /scripts/connectivity-check.sh
-```
-
-**Expected:**
-
-| Test | Result | Why |
-|------|--------|-----|
-| 1 — Pod IP | no response (curl error 28) | dropped by `baseline-default-deny` |
-| 2 — Service name | no response (curl error 28) | dropped by `baseline-default-deny` |
-| 3 — FQDN via Avi (SQLi) | **HTTP 403** | blocked by the Avi WAF |
-| 4 — FQDN via Avi (PHP) | **HTTP 403** | blocked by the Avi WAF |
-| 5 — FQDN via Avi (clean) | **HTTP 200** | allowed ingress path |
-
-### Step B — Remove the baseline deny and the WAF
-
-Dropping the catch-all opens the two in-cluster paths; deleting the L7Rule
-detaches the WAF so the attacks reach the app.
-
-```bash
-# Delete the ACNP catch-all baseline rule
-k delete acnp baseline-default-deny
-  clusternetworkpolicy.crd.antrea.io "baseline-default-deny" deleted
-
-# Delete the AKO L7Rule (detaches the Avi WAF)
-k delete l7rule metal-store-waf -n music-store
-
 k -n music-store exec -it pod/attacker -- /bin/bash
   /scripts/connectivity-check.sh
 ```
@@ -142,23 +118,38 @@ k -n music-store exec -it pod/attacker -- /bin/bash
 | 4 — FQDN via Avi (PHP) | **HTTP 200** | not blocked — payload reaches the app on the root path |
 | 5 — FQDN via Avi (clean) | **HTTP 200** | allowed ingress path |
 
-### Step C — Restore the baseline deny and the WAF
 
-Reapply the ACNP and recreate the L7Rule to showcase full control of
-microservice communication and ingress inspection.
+### Step B — Apply the baseline Antrea Cluster Network Policy(ACNP) baseline and the Avi WAF L7rule
+
 
 ```bash
-k apply -f ./k8s/baseline-default-deny.yaml      # from the k8s-vdefend-layered repo
-k apply -f ./k8s/metal-store-waf-l7rule.yaml     # recreate the Avi WAF L7Rule
-k get acnp
+# Add back the ACNP catch-all baseline rule
+k apply -f /github/k8s-vdefend-layered/k8s/baseline-default-deny.yaml
+    clusternetworkpolicy.crd.antrea.io "baseline-default-deny" created
+
+# Add back the AKO L7Rule (attaches the Avi WAF)
+k apply -f /github/k8s-vdefend-layered/k8s/metal-store-waf-l7rule.yaml
+    l7rule.ako.vmware.com/metal-store-waf created
+
+k get acnp -A
 k get l7rule -n music-store
 
 k -n music-store exec -it pod/attacker -- /bin/bash
   /scripts/connectivity-check.sh
 ```
 
-**Expected:** back to the Step A results — tests 1 and 2 denied, tests 3 and 4
-→ 403, test 5 → 200.
+**Expected:**
+
+| Test | Result | Why |
+|------|--------|-----|
+| 1 — Pod IP | no response timeout/drop | dropped by `baseline-default-deny` so you cant bypass Avi WAF|
+| 2 — Service name | no response timeout/drop | dropped by `baseline-default-deny` so you cant bypass Avi WAF|
+| 3 — FQDN via Avi (SQLi) | **HTTP 403** | blocked by the Avi WAF |
+| 4 — FQDN via Avi (PHP) | **HTTP 403** | blocked by the Avi WAF |
+| 5 — FQDN via Avi (clean) | **HTTP 200** | allowed ingress path |
+
+
+
 
 ---
 
@@ -194,44 +185,5 @@ docker build --platform linux/amd64 -t mytkrausjr/waf-demo:v0.6 .
 docker push mytkrausjr/waf-demo:v0.6
 ```
 
----
 
-## Testing the image against a local cluster (Colima)
 
-```bash
-colima status
-k config use-context colima
-#   Switched to context "colima".
-
-k get po,svc
-#   NAME                            READY   STATUS    RESTARTS      AGE
-#   pod/web-demo-6994854496-9zm84   1/1     Running   8 (14d ago)   126d
-#
-#   NAME                     TYPE           CLUSTER-IP     EXTERNAL-IP    PORT(S)        AGE
-#   service/kubernetes       ClusterIP      10.43.0.1      <none>         443/TCP        126d
-#   service/web-service-lb   LoadBalancer   10.43.111.17   192.168.64.2   80:32747/TCP   126d
-```
-
-The nginx pod is exposed to the Mac via the external IP:
-
-```bash
-curl http://192.168.64.2
-#   <!DOCTYPE html>
-#   <html>
-#   <head>
-#   <title>Welcome to nginx!</title>
-```
-
-Label the local pod so the probe's selector finds it, then run the attacker pod:
-
-```bash
-k label po web-demo-6994854496-9zm84 app=music-store-1 --overwrite=true
-#   pod/web-demo-6994854496-9zm84 labeled
-
-# Update the ENV in k8s/attacker-pod.yaml (Avi VIP, HOST, etc.) first.
-k apply -f k8s/attacker-rbac.yaml
-k apply -f k8s/attacker-pod.yaml
-
-k -n music-store exec -it pod/attacker -- /bin/bash
-#   /scripts/connectivity-check.sh
-```
