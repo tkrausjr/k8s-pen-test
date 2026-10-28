@@ -1,9 +1,8 @@
 ## k8s-pen-test — Avi WAF + vDefend Microsegmentation Demo
 
 An attacker pod and a small probe script (`connectivity-check.sh`) used to
-demonstrate layered Kubernetes network security for any Kubernetes Web Application running on VCF with vDefend and Avi using
-Avi (AKO) WAF for inbound traffic, and vDefend/Antrea microsegmentation inside the
-cluster.
+demonstrate layered Kubernetes network security for any Kubernetes Web Application running on VCF using
+Avi (AKO) WAF for inbound traffic, and vDefend/Antrea microsegmentation inside the cluster.
 
 > **v0.6** — the probe script ships as a ConfigMap mounted into the pod, for
 > faster iteration (edit the script, recreate the pod — no image rebuild). The
