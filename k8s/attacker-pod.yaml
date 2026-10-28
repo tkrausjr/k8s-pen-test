@@ -40,9 +40,9 @@ spec:
     tty: true
     env:
     - name: VIP
-      value: "110.0.0.0"
+      value: "10.47.7.26"
     - name: HOST
-      value: "app.url.com"
+      value: "metal-store.acme.gpu.set.lab"
     - name: SVC
       value: "http://music-store-1-service.music-store.svc.cluster.local:5000"
     - name: TGT_NS
@@ -53,6 +53,8 @@ spec:
       value: "5000"
     - name: SQLI
       value: "search?searchString=%27%20OR%201%3D1--"
+    - name: PHPI
+      value: "?file=php%3A%2F%2Ffilter%2Fconvert.base64-encode%2Fresource%3Dindex.php"
     volumeMounts:
     - name: script
       mountPath: /scripts
@@ -86,8 +88,9 @@ data:
         # Paths tested:
         #   1) Pod IP        - target pod discovered by label, hit directly (bypasses Service + Avi)
         #   2) Service name  - in-cluster Kubernetes Service DNS (bypasses Avi)
-        #   3) HTTPRoute FQDN - the real ingress path through the Avi VIP + WAF (clean request)
-        #   4) HTTPRoute FQDN - same path, but carrying a SQL injection payload (WAF must block)
+        #   3) HTTPRoute FQDN - same path, carrying a SQL injection payload (WAF must block)
+        #   4) HTTPRoute FQDN - same path, carrying a PHP injection payload (WAF must block)
+        #   5) HTTPRoute FQDN - the real ingress path through the Avi VIP + WAF (clean request)
         #
         # Set these in the pod spec's container env (shown with example values):
         #   VIP        10.0.0.0                        # Avi VIP the HTTPRoute FQDN resolves to
@@ -96,7 +99,8 @@ data:
         #   TGT_NS     music-store                        # namespace the target pod lives in
         #   TGT_LABEL  app=music-store-1                  # label selector used to find the target pod
         #   PORT       5000                               # app port for the pod-IP probe
-        #   SQLI       search?searchString=%27%20OR%201%3D1--   # injection payload (query string)
+        #   SQLI       search?searchString=%27%20OR%201%3D1--   # SQL injection payload (query string)
+        #   PHPI       ?file=php%3A%2F%2Ffilter%2F...    # PHP injection payload (query string)
         
         set -u
         
@@ -107,7 +111,8 @@ data:
         TGT_LABEL=${TGT_LABEL:-app=music-store-1}
         PORT=${PORT:-5000}
         SQLI=${SQLI:-search?searchString=%27%20OR%201%3D1--}
-        
+        PHPI=${PHPI:-?file=php%3A%2F%2Ffilter%2Fconvert.base64-encode%2Fresource%3Dindex.php}
+    
         U=http://$HOST
         R="--resolve $HOST:80:$VIP"   # pin FQDN to the Avi VIP
         TIMEOUT=${TIMEOUT:-5}
@@ -165,13 +170,17 @@ data:
         head "3) HTTPRoute FQDN through Avi  (SQL injection - WAF should block with 400 error)"
         probe "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
     
-        head "4) HTTPRoute FQDN through Avi  (clean request should be allowed)"
+        head "4) HTTPRoute FQDN through Avi  (PHP injection - WAF should block with 403)"
+        probe "GET ${U}/${PHPI}" "HTTP 403 - Avi WAF blocks the PHP wrapper/LFI at the SE" $R "${U}/${PHPI}"
+    
+        head "5) HTTPRoute FQDN through Avi  (clean request should be allowed)"
         probe "GET ${U}/" "HTTP 200 - allowed ingress path through Avi + WAF" $R "${U}/"
     
         echo
         hr
         echo "${B}${C}  SUMMARY${N}"
         echo "   1 & 2 around Avi : expect failure / deny - no WAF, no allowed path"
-        echo "   3 through Avi    : expect 403 - WAF inspects and blocks the attack"
-        echo "   4 through Avi    : expect 200 - clean traffic allowed"
+        echo "   3 through Avi    : expect 403 - WAF inspects and blocks the SQL injection"
+        echo "   4 through Avi    : expect 403 - WAF inspects and blocks the PHP injection"
+        echo "   5 through Avi    : expect 200 - clean traffic allowed"
         hr
