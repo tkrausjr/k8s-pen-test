@@ -76,10 +76,11 @@
       err=$(cat /tmp/curlerr 2>/dev/null)
       if [ "$code" -ne 0 ]; then
         if [ "$deny" -eq 1 ]; then
-          echo "   ${G}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})} (expected - traffic dropped)${N}"
+          echo "   ${G}RESULT: no HTTP response - (expected - traffic dropped)${N}"
+          echo "   Traffic dropped by ACNP baseline rule."
         else
-          echo "   ${Rc}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})}${N}"
-          echo "   Traffic may have been dropped by ACNP baseline rule."
+          echo "   ${Rc}RESULT: no HTTP response - ${N}"
+          echo "   Traffic dropped by ACNP baseline rule."
         fi
       else
         if [ "$deny" -eq 1 ]; then
@@ -128,7 +129,8 @@
     echo
     hr
     echo "${B}${C}  SUMMARY${N}"
-    echo "   1 & 2 around Avi : expect failure / deny - no WAF, no allowed path"
+    echo "   1 bypassing Avi  : expect timeout/drop - vDefend forces traffic through the WAF"
+    echo "   2 bypassing Avi  : expect timeout/drop - vDefend forces traffic through the WAF"
     echo "   3 through Avi    : expect 403 - WAF inspects and blocks the SQL injection"
     echo "   4 through Avi    : expect 403 - WAF inspects and blocks the PHP injection"
     echo "   5 through Avi    : expect 200 - clean traffic allowed"
