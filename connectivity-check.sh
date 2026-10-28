@@ -1,5 +1,5 @@
     #!/bin/bash
-    # waf-connectivity-check.sh
+    # connectivity-check.sh
     #
     # Run from INSIDE a pod (e.g. the attacker/waf-demo pod). Non-interactive.
     # Probes the music-store frontend over four paths and prints the HTTP return
@@ -20,7 +20,7 @@
     #   TGT_NS     music-store                        # namespace the target pod lives in
     #   TGT_LABEL  app=music-store-1                  # label selector used to find the target pod
     #   PORT       5000                               # app port for the pod-IP probe
-    #   SQLI       search?searchString=%27%20OR%201%3D1--   # SQL injection payload (query string)
+    #   SQLI       ?searchString=%27%20OR%201%3D1--   # SQL injection payload (root-path query string)
     #   PHPI       ?file=php%3A%2F%2Ffilter%2F...    # PHP injection payload (query string)
     
     set -u
@@ -31,7 +31,7 @@
     TGT_NS=${TGT_NS:-music-store}
     TGT_LABEL=${TGT_LABEL:-app=music-store-1}
     PORT=${PORT:-5000}
-    SQLI=${SQLI:-search?searchString=%27%20OR%201%3D1--}
+    SQLI=${SQLI:-?searchString=%27%20OR%201%3D1--}
     PHPI=${PHPI:-?file=php%3A%2F%2Ffilter%2Fconvert.base64-encode%2Fresource%3Dindex.php}
 
     U=http://$HOST
@@ -48,9 +48,23 @@
     hr()  { echo "${B}${C}----------------------------------------------------------------${N}"; }
     head() { echo; hr; echo "${B}${C}  $*${N}"; hr; }
     
-    # probe <label> <expected-note> <curl-args...>
-    # prints the HTTP code (or the curl failure) and a PASS/FAIL line
+    # probe [--deny | --expect CODE] <label> <expected-note> <curl-args...>
+    # prints the HTTP code (or the curl failure) and a PASS/FAIL line.
+    # --deny        : a no-response (curl failure) is the EXPECTED result -> green,
+    #                 while any HTTP response is unexpected -> red. Used for probes
+    #                 that should be dropped (e.g. pod IP / Service behind default-deny).
+    # --expect CODE : only HTTP CODE is the expected result -> green; any other
+    #                 code (or no response) -> red. Used for attack probes that the
+    #                 WAF must block (e.g. --expect 403) or the clean path (200).
     probe() {
+      local deny=0 expect=""
+      while :; do
+        case "$1" in
+          --deny)   deny=1; shift ;;
+          --expect) expect=$2; shift 2 ;;
+          *)        break ;;
+        esac
+      done
       local label=$1 note=$2; shift 2
       echo
       echo "${B}== ${label}${N}"
@@ -61,10 +75,24 @@
       code=$?
       err=$(cat /tmp/curlerr 2>/dev/null)
       if [ "$code" -ne 0 ]; then
-        echo "   ${Rc}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})}${N}"
-        echo "   Traffic may have been dropped by ACNP baseline rule."
+        if [ "$deny" -eq 1 ]; then
+          echo "   ${G}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})} (expected - traffic dropped)${N}"
+        else
+          echo "   ${Rc}RESULT: no HTTP response - curl exit ${code}${err:+ (${err})}${N}"
+          echo "   Traffic may have been dropped by ACNP baseline rule."
+        fi
       else
-        echo "   ${G}RESULT: HTTP ${out}${N}"
+        if [ "$deny" -eq 1 ]; then
+          echo "   ${Rc}RESULT: HTTP ${out} (unexpected - traffic was NOT dropped)${N}"
+        elif [ -n "$expect" ]; then
+          if [ "$out" = "$expect" ]; then
+            echo "   ${G}RESULT: HTTP ${out}${N}"
+          else
+            echo "   ${Rc}RESULT: HTTP ${out} (unexpected - expected ${expect})${N}"
+          fi
+        else
+          echo "   ${G}RESULT: HTTP ${out}${N}"
+        fi
       fi
     }
     
@@ -80,22 +108,22 @@
     
     head "1) Direct to pod IP  (Tries to bypass Service and Avi WAF)"
     if [ -n "$IP" ]; then
-      probe "pod IP ${IP}:${PORT}" "dropped by baseline ACNP rule default-deny" "http://${IP}:${PORT}/"
+      probe --deny "pod IP ${IP}:${PORT}" "dropped by baseline ACNP rule default-deny" "http://${IP}:${PORT}/"
     else
       echo "   ${Y}skipped - no pod IP resolved${N}"
     fi
     
     head "2) In-cluster Service name  (Tries to bypass Avi WAF)"
-    probe "service ${SVC}" "dropped by default-deny (only Avi SE may reach :${PORT})" "${SVC}/"
+    probe --deny "service ${SVC}" "dropped by default-deny (only Avi SE may reach :${PORT})" "${SVC}/"
     
     head "3) HTTPRoute FQDN through Avi  (SQL injection - WAF should block with 400 error)"
-    probe "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
+    probe --expect 403 "GET ${U}/${SQLI}" "HTTP 403 - Avi WAF blocks the injection at the SE" $R "${U}/${SQLI}"
 
     head "4) HTTPRoute FQDN through Avi  (PHP injection - WAF should block with 403)"
-    probe "GET ${U}/${PHPI}" "HTTP 403 - Avi WAF blocks the PHP wrapper/LFI at the SE" $R "${U}/${PHPI}"
+    probe --expect 403 "GET ${U}/${PHPI}" "HTTP 403 - Avi WAF blocks the PHP wrapper/LFI at the SE" $R "${U}/${PHPI}"
 
     head "5) HTTPRoute FQDN through Avi  (clean request should be allowed)"
-    probe "GET ${U}/" "HTTP 200 - allowed ingress path through Avi + WAF" $R "${U}/"
+    probe --expect 200 "GET ${U}/" "HTTP 200 - allowed ingress path through Avi + WAF" $R "${U}/"
 
     echo
     hr
